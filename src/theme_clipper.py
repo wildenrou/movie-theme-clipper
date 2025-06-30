@@ -5,6 +5,10 @@ import librosa
 import subprocess
 import logging
 import sys
+import json
+import hashlib
+import time
+import shutil
 from moviepy import VideoFileClip
 import moviepy
 
@@ -61,15 +65,256 @@ def suppress_output():
             sys.stdout = old_stdout
             sys.stderr = old_stderr
 
+# ===== TRAILER MANAGEMENT FUNCTIONS =====
+
+def get_file_hash(file_path):
+    """Generate a hash of the file for tracking processed files."""
+    hash_md5 = hashlib.md5()
+    try:
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+    except Exception as e:
+        logger.warning(f"Could not generate hash for {file_path}: {e}")
+        return None
+
+def load_processed_files(tracking_file):
+    """Load the list of already processed files."""
+    if tracking_file and os.path.exists(tracking_file):
+        try:
+            with open(tracking_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not load tracking file: {e}")
+    return {}
+
+def save_processed_files(tracking_file, processed_files):
+    """Save the list of processed files."""
+    if not tracking_file:
+        return
+    try:
+        os.makedirs(os.path.dirname(tracking_file), exist_ok=True)
+        with open(tracking_file, 'w') as f:
+            json.dump(processed_files, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not save tracking file: {e}")
+
+def is_file_already_processed(file_path, processed_files, volume_factor):
+    """Check if a file has already been processed with the same volume factor."""
+    file_hash = get_file_hash(file_path)
+    if not file_hash:
+        return False
+    
+    if file_hash in processed_files:
+        stored_volume = processed_files[file_hash].get('volume_factor')
+        if stored_volume == volume_factor:
+            logger.debug(f"File already processed with volume factor {volume_factor}: {os.path.basename(file_path)}")
+            return True
+    
+    return False
+
+def mark_file_as_processed(file_path, processed_files, volume_factor):
+    """Mark a file as processed with the given volume factor."""
+    file_hash = get_file_hash(file_path)
+    if file_hash:
+        processed_files[file_hash] = {
+            'file_path': file_path,
+            'volume_factor': volume_factor,
+            'processed_date': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'file_size': os.path.getsize(file_path)
+        }
+
+def clean_invalid_symlinks(directory):
+    """Remove invalid symbolic links in the specified directory."""
+    cleaned_count = 0
+    
+    try:
+        if not os.path.exists(directory) or not os.path.isdir(directory):
+            return 0
+        
+        for filename in os.listdir(directory):
+            full_path = os.path.join(directory, filename)
+            if os.path.islink(full_path):
+                target_path = os.readlink(full_path)
+                if not os.path.exists(os.path.abspath(os.path.join(directory, target_path))):
+                    logger.info(f"Removing invalid symlink: {filename} -> {target_path}")
+                    try:
+                        os.remove(full_path)
+                        cleaned_count += 1
+                    except OSError as e:
+                        logger.warning(f"Failed to remove invalid symlink {filename}: {e}")
+        
+        return cleaned_count
+        
+    except Exception as e:
+        logger.error(f"Error in clean_invalid_symlinks: {e}")
+        return 0
+
+def find_and_fix_trailer(trailers_dir):
+    """Find misnamed trailer files and rename them to trailer.mp4."""
+    try:
+        if not os.path.exists(trailers_dir) or not os.path.isdir(trailers_dir):
+            return None
+        
+        for filename in os.listdir(trailers_dir):
+            full_path = os.path.join(trailers_dir, filename)
+            
+            if not os.path.isfile(full_path):
+                continue
+                
+            name, ext = os.path.splitext(filename)
+            if name.lower().endswith("trailer") and ext.lower() == ".mp4":
+                target_path = os.path.join(trailers_dir, "trailer.mp4")
+                logger.info(f"Renaming misnamed trailer: {filename} -> trailer.mp4")
+                try:
+                    os.rename(full_path, target_path)
+                    return target_path
+                except OSError as e:
+                    logger.error(f"Failed to rename trailer {filename}: {e}")
+                    return None
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error in find_and_fix_trailer: {e}")
+        return None
+
+def reduce_video_volume_internal(video_path, volume_factor=0.5, processed_files=None):
+    """Reduce the volume of a video file using internal FFmpeg."""
+    if not os.path.isfile(video_path):
+        logger.error(f"Video file not found: {video_path}")
+        return False
+    
+    # Check if file has already been processed
+    if processed_files and is_file_already_processed(video_path, processed_files, volume_factor):
+        return True
+    
+    logger.info(f"Reducing volume by {int((1-volume_factor)*100)}% for {os.path.basename(video_path)}")
+    
+    temp_output = video_path + ".tmp"
+    
+    try:
+        if os.path.exists(temp_output):
+            os.remove(temp_output)
+        
+        # FFmpeg command for volume reduction
+        cmd = [
+            'ffmpeg', '-y', '-v', 'warning',
+            '-i', video_path,
+            '-c:v', 'copy',  # Copy video without re-encoding
+            '-af', f'volume={volume_factor}',  # Reduce audio volume
+            '-c:a', 'aac',   # Re-encode audio
+            '-movflags', '+faststart',
+            temp_output
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        
+        if result.returncode != 0:
+            logger.error(f"FFmpeg volume reduction failed for {os.path.basename(video_path)}")
+            if result.stderr:
+                logger.error(f"FFmpeg stderr: {result.stderr[-300:]}")
+            return False
+        
+        # Check output file
+        if not os.path.exists(temp_output):
+            logger.error("Volume reduction output file was not created")
+            return False
+        
+        output_size = os.path.getsize(temp_output)
+        input_size = os.path.getsize(video_path)
+        
+        if output_size < input_size * 0.1:
+            logger.error("Volume reduction output file suspiciously small")
+            os.remove(temp_output)
+            return False
+        
+        # Replace original with processed version
+        original_stat = os.stat(video_path)
+        shutil.move(temp_output, video_path)
+        os.chmod(video_path, original_stat.st_mode)
+        
+        # Mark as processed
+        if processed_files is not None:
+            mark_file_as_processed(video_path, processed_files, volume_factor)
+        
+        logger.info(f"Volume reduction successful for {os.path.basename(video_path)}")
+        return True
+        
+    except subprocess.TimeoutExpired:
+        logger.error(f"Volume reduction timeout for {os.path.basename(video_path)}")
+        return False
+    except Exception as e:
+        logger.error(f"Volume reduction failed for {os.path.basename(video_path)}: {e}")
+        return False
+    finally:
+        if os.path.exists(temp_output):
+            try:
+                os.remove(temp_output)
+            except:
+                pass
+
+def manage_movie_trailers(movie_folder_path, process_volume=False, volume_factor=0.5, processed_files=None):
+    """Manage trailers for a single movie folder."""
+    movie_name = os.path.basename(movie_folder_path)
+    trailers_dir = os.path.join(movie_folder_path, "Trailers")
+    backdrops_dir = os.path.join(movie_folder_path, "Backdrops")
+    
+    # Create directories if they don't exist
+    os.makedirs(trailers_dir, exist_ok=True)
+    os.makedirs(backdrops_dir, exist_ok=True)
+    
+    # Clean invalid symlinks
+    cleaned = clean_invalid_symlinks(trailers_dir) + clean_invalid_symlinks(backdrops_dir)
+    if cleaned > 0:
+        logger.info(f"Cleaned {cleaned} invalid symlinks in {movie_name}")
+    
+    trailer_file = os.path.join(trailers_dir, "trailer.mp4")
+    symlink_file = os.path.join(backdrops_dir, "theme2.mp4")
+    relative_target = os.path.relpath(trailer_file, backdrops_dir)
+    
+    # Ensure trailer file exists
+    if not os.path.isfile(trailer_file):
+        fixed_path = find_and_fix_trailer(trailers_dir)
+        if not fixed_path:
+            logger.debug(f"No trailer file found for {movie_name}")
+            return False
+    
+    # Process audio volume if requested
+    if process_volume:
+        reduce_video_volume_internal(trailer_file, volume_factor, processed_files)
+    
+    # Manage symlink
+    if os.path.islink(symlink_file):
+        existing_target = os.readlink(symlink_file)
+        if os.path.abspath(os.path.join(backdrops_dir, existing_target)) == os.path.abspath(trailer_file):
+            logger.debug(f"Symlink already correct for {movie_name}")
+            return True
+        else:
+            logger.info(f"Fixing incorrect symlink for {movie_name}")
+            os.remove(symlink_file)
+    elif os.path.exists(symlink_file):
+        logger.warning(f"theme2.mp4 is a real file in {movie_name}, skipping symlink creation")
+        return False
+    
+    try:
+        os.symlink(relative_target, symlink_file)
+        logger.info(f"Created symlink theme2.mp4 -> trailer.mp4 for {movie_name}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to create symlink for {movie_name}: {e}")
+        return False
+
+# ===== ORIGINAL THEME CLIPPER FUNCTIONS =====
+
 def check_gpu_availability():
     """Check if Intel GPU is available and working."""
     try:
-        # Check if device exists
         if not os.path.exists('/dev/dri/renderD128'):
             logger.warning("Intel GPU device /dev/dri/renderD128 not found")
             return False
             
-        # Test VAAPI
         result = subprocess.run(['vainfo'], capture_output=True, text=True, timeout=10)
         if result.returncode == 0 and 'H264' in result.stdout:
             logger.info("Intel GPU with H.264 VAAPI support detected")
@@ -199,37 +444,66 @@ def extract_theme_clip(movie_path, output_path, start_time, clip_length, use_gpu
         return False
 
 def process_movies(base_path, clip_length=18, method='visual', start_buffer=120, 
-                  end_ignore_pct=0.3, force=False, use_gpu=False):
-    """Main processing function."""
+                  end_ignore_pct=0.3, force=False, use_gpu=False, 
+                  process_trailers=True, process_trailer_volume=False, trailer_volume_factor=0.5):
+    """Main processing function with enhanced trailer management."""
     
     logger.info(f"🎬 Movie Theme Clipper starting...")
     logger.info(f"📁 Movie path: {base_path}")
     logger.info(f"⏱️ Clip length: {clip_length}s")
     logger.info(f"🎭 Method: {method}")
     logger.info(f"🚀 GPU acceleration: {use_gpu}")
+    logger.info(f"🎞️ Process trailers: {process_trailers}")
+    if process_trailers and process_trailer_volume:
+        logger.info(f"🔊 Trailer volume reduction: {int((1-trailer_volume_factor)*100)}%")
     
     movies_data = find_movie_files(base_path)
     if not movies_data:
         logger.error("No movies found to process")
         return
 
+    # Setup trailer tracking
+    processed_trailers = {}
+    tracking_file = None
+    
+    if process_trailers and process_trailer_volume:
+        tracking_file = "/logs/processed_trailers.json"
+        processed_trailers = load_processed_files(tracking_file)
+        logger.info(f"Loaded {len(processed_trailers)} previously processed trailers")
+
     processed = 0
     skipped = 0
     failed = 0
+    trailers_processed = 0
+    trailers_skipped = 0
 
     for movie_folder_path, movie_file_path in tqdm(movies_data, desc="Processing movies", unit="movie"):
         movie_name = os.path.basename(movie_file_path)
-        backdrop_dir = os.path.join(movie_folder_path, "Backdrops")
+        movie_folder = os.path.dirname(movie_file_path)
+        backdrop_dir = os.path.join(movie_folder, "Backdrops")
         theme_clip_output_path = os.path.join(backdrop_dir, "theme.mp4")
 
-        # Skip if theme already exists
+        # Process trailers first
+        if process_trailers:
+            trailer_result = manage_movie_trailers(
+                movie_folder, 
+                process_trailer_volume, 
+                trailer_volume_factor, 
+                processed_trailers
+            )
+            if trailer_result:
+                trailers_processed += 1
+            else:
+                trailers_skipped += 1
+
+        # Skip theme creation if already exists
         if os.path.exists(theme_clip_output_path) and os.path.getsize(theme_clip_output_path) > 0 and not force:
-            logger.info(f"⏩ Skipping {movie_name} - theme.mp4 already exists")
+            logger.info(f"⏩ Skipping {os.path.basename(movie_folder)} - theme.mp4 already exists")
             skipped += 1
             continue
 
         os.makedirs(backdrop_dir, exist_ok=True)
-        logger.info(f"🎞️ Processing: {movie_name}")
+        logger.info(f"🎞️ Processing theme clip: {os.path.basename(movie_folder)}")
 
         try:
             # Get movie duration using ffprobe
@@ -254,8 +528,7 @@ def process_movies(base_path, clip_length=18, method='visual', start_buffer=120,
                 failed += 1
                 continue
 
-            # For now, use random selection (simplified version)
-            # You can add the full analysis methods later
+            # Calculate clip timing
             current_clip_length = min(clip_length, duration * 0.8)
             if current_clip_length < 5:
                 current_clip_length = min(duration, clip_length)
@@ -279,10 +552,10 @@ def process_movies(base_path, clip_length=18, method='visual', start_buffer=120,
                                        start_time_sec, current_clip_length, use_gpu=use_gpu)
 
             if success and os.path.exists(theme_clip_output_path) and os.path.getsize(theme_clip_output_path) > 100:
-                logger.info(f"✅ Successfully created theme clip for {movie_name}")
+                logger.info(f"✅ Successfully created theme clip for {os.path.basename(movie_folder)}")
                 processed += 1
             else:
-                logger.error(f"❌ Failed to create theme clip for {movie_name}")
+                logger.error(f"❌ Failed to create theme clip for {os.path.basename(movie_folder)}")
                 failed += 1
 
         except subprocess.TimeoutExpired:
@@ -292,7 +565,14 @@ def process_movies(base_path, clip_length=18, method='visual', start_buffer=120,
             logger.error(f"Error processing {movie_name}: {e}")
             failed += 1
 
-    logger.info(f"🎉 Processing complete: {processed} processed, {skipped} skipped, {failed} failed")
+    # Save trailer tracking data
+    if process_trailers and process_trailer_volume and tracking_file:
+        save_processed_files(tracking_file, processed_trailers)
+
+    logger.info(f"🎉 Processing complete:")
+    logger.info(f"   Theme clips: {processed} processed, {skipped} skipped, {failed} failed")
+    if process_trailers:
+        logger.info(f"   Trailers: {trailers_processed} processed, {trailers_skipped} skipped")
 
 def get_env_bool(env_var, default=False):
     """Convert environment variable to boolean."""
@@ -322,6 +602,11 @@ if __name__ == '__main__':
     end_ignore_pct = get_env_float('END_IGNORE_PCT', 0.3)
     use_gpu = get_env_bool('USE_GPU', False)
     force = get_env_bool('FORCE', False)
+    
+    # New trailer management options
+    process_trailers = get_env_bool('PROCESS_TRAILERS', True)
+    process_trailer_volume = get_env_bool('PROCESS_TRAILER_VOLUME', False)
+    trailer_volume_factor = get_env_float('TRAILER_VOLUME_FACTOR', 0.5)
 
     # Validate GPU if requested
     if use_gpu:
@@ -336,6 +621,10 @@ if __name__ == '__main__':
     logger.info(f"  Method: {method}")
     logger.info(f"  GPU acceleration: {use_gpu}")
     logger.info(f"  Force overwrite: {force}")
+    logger.info(f"  Process trailers: {process_trailers}")
+    logger.info(f"  Process trailer volume: {process_trailer_volume}")
+    if process_trailer_volume:
+        logger.info(f"  Trailer volume factor: {trailer_volume_factor}")
 
     try:
         process_movies(
@@ -345,7 +634,10 @@ if __name__ == '__main__':
             start_buffer=start_buffer,
             end_ignore_pct=end_ignore_pct,
             force=force,
-            use_gpu=use_gpu
+            use_gpu=use_gpu,
+            process_trailers=process_trailers,
+            process_trailer_volume=process_trailer_volume,
+            trailer_volume_factor=trailer_volume_factor
         )
     except KeyboardInterrupt:
         logger.info("Processing interrupted by user")

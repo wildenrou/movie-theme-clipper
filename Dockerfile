@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 LABEL org.opencontainers.image.title="Movie Theme Clipper"
-LABEL org.opencontainers.image.description="Automatically generates theme clips from movie collections using AI analysis"
+LABEL org.opencontainers.image.description="Automatically generates theme clips and manages trailers for movie collections"
 LABEL org.opencontainers.image.vendor="wildenrou"
 LABEL org.opencontainers.image.source="https://github.com/wildenrou/movie-theme-clipper"
 
@@ -42,6 +42,12 @@ ENV END_IGNORE_PCT="0.3"
 ENV USE_GPU="false"
 ENV FORCE="false"
 ENV LOG_LEVEL="INFO"
+
+# New trailer management environment variables
+ENV PROCESS_TRAILERS="true"
+ENV PROCESS_TRAILER_VOLUME="false"
+ENV TRAILER_VOLUME_FACTOR="0.5"
+
 ENV PYTHONUNBUFFERED=1
 
 # Health check
