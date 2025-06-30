@@ -5,11 +5,12 @@ LABEL org.opencontainers.image.description="Automatically generates theme clips 
 LABEL org.opencontainers.image.vendor="wildenrou"
 LABEL org.opencontainers.image.source="https://github.com/wildenrou/movie-theme-clipper"
 
-# Install system dependencies
+# Install system dependencies, including Intel VA-API driver
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsndfile1-dev \
     vainfo \
+    intel-media-va-driver \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
