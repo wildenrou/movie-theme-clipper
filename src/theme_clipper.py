@@ -9,6 +9,8 @@ import json
 import hashlib
 import time
 import shutil
+import pwd
+import grp
 from moviepy import VideoFileClip
 import moviepy
 
@@ -65,7 +67,285 @@ def suppress_output():
             sys.stdout = old_stdout
             sys.stderr = old_stderr
 
-# ===== TRAILER MANAGEMENT FUNCTIONS =====
+# ===== NEW DIRECTORY MANAGEMENT FUNCTIONS =====
+
+def get_nobody_uid_gid():
+    """Get the UID and GID for the 'nobody' user."""
+    try:
+        nobody_user = pwd.getpwnam('nobody')
+        nobody_group = grp.getgrnam('nobody')
+        return nobody_user.pw_uid, nobody_group.gr_gid
+    except KeyError:
+        try:
+            # Fallback to 'nogroup' if 'nobody' group doesn't exist
+            nobody_user = pwd.getpwnam('nobody')
+            nogroup = grp.getgrnam('nogroup')
+            return nobody_user.pw_uid, nogroup.gr_gid
+        except KeyError:
+            logger.warning("Could not find 'nobody' user or group, using numeric fallback")
+            return 65534, 65534  # Standard nobody UID/GID
+
+def set_directory_permissions(directory_path, recursive=True):
+    """Set directory ownership to 'nobody' and permissions to read/write for all."""
+    try:
+        if not os.path.exists(directory_path):
+            logger.warning(f"Directory does not exist: {directory_path}")
+            return False
+        
+        nobody_uid, nobody_gid = get_nobody_uid_gid()
+        
+        # Set permissions for the directory itself
+        os.chmod(directory_path, 0o755)  # rwxr-xr-x for directories
+        os.chown(directory_path, nobody_uid, nobody_gid)
+        
+        if recursive:
+            for root, dirs, files in os.walk(directory_path):
+                # Set directory permissions
+                for dir_name in dirs:
+                    dir_path = os.path.join(root, dir_name)
+                    try:
+                        os.chmod(dir_path, 0o755)
+                        os.chown(dir_path, nobody_uid, nobody_gid)
+                    except (OSError, PermissionError) as e:
+                        logger.warning(f"Could not set permissions for directory {dir_path}: {e}")
+                
+                # Set file permissions
+                for file_name in files:
+                    file_path = os.path.join(root, file_name)
+                    try:
+                        os.chmod(file_path, 0o644)  # rw-r--r-- for files
+                        os.chown(file_path, nobody_uid, nobody_gid)
+                    except (OSError, PermissionError) as e:
+                        logger.warning(f"Could not set permissions for file {file_path}: {e}")
+        
+        logger.info(f"Set permissions for directory: {os.path.basename(directory_path)}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error setting permissions for {directory_path}: {e}")
+        return False
+
+def find_case_insensitive_directories(movie_folder, target_names):
+    """Find directories with case-insensitive matching to target names."""
+    found_dirs = {}
+    
+    try:
+        if not os.path.exists(movie_folder) or not os.path.isdir(movie_folder):
+            return found_dirs
+        
+        for item in os.listdir(movie_folder):
+            item_path = os.path.join(movie_folder, item)
+            if os.path.isdir(item_path):
+                for target in target_names:
+                    if item.lower() == target.lower():
+                        if target not in found_dirs:
+                            found_dirs[target] = []
+                        found_dirs[target].append((item, item_path))
+        
+        return found_dirs
+        
+    except Exception as e:
+        logger.error(f"Error scanning directory {movie_folder}: {e}")
+        return {}
+
+def merge_directories_preserving_symlinks(source_dir, target_dir):
+    """Merge source directory into target directory, preserving symlinks."""
+    try:
+        if not os.path.exists(source_dir):
+            return True
+        
+        if not os.path.exists(target_dir):
+            os.makedirs(target_dir, exist_ok=True)
+        
+        merge_count = 0
+        
+        for item in os.listdir(source_dir):
+            source_item = os.path.join(source_dir, item)
+            target_item = os.path.join(target_dir, item)
+            
+            if os.path.islink(source_item):
+                # Handle symlinks
+                if os.path.exists(target_item) or os.path.islink(target_item):
+                    logger.info(f"Target already exists, skipping symlink: {item}")
+                    continue
+                
+                # Copy the symlink
+                link_target = os.readlink(source_item)
+                os.symlink(link_target, target_item)
+                logger.info(f"Moved symlink: {item}")
+                merge_count += 1
+                
+            elif os.path.isdir(source_item):
+                # Handle subdirectories
+                if not os.path.exists(target_item):
+                    shutil.move(source_item, target_item)
+                    logger.info(f"Moved directory: {item}")
+                    merge_count += 1
+                else:
+                    # Recursively merge subdirectories
+                    merge_directories_preserving_symlinks(source_item, target_item)
+                    merge_count += 1
+                    
+            elif os.path.isfile(source_item):
+                # Handle regular files
+                if os.path.exists(target_item):
+                    # Check if files are the same
+                    if os.path.getsize(source_item) == os.path.getsize(target_item):
+                        logger.info(f"Target file already exists with same size, skipping: {item}")
+                        continue
+                    else:
+                        # Rename with suffix to avoid overwrite
+                        base, ext = os.path.splitext(item)
+                        counter = 1
+                        while os.path.exists(os.path.join(target_dir, f"{base}_{counter}{ext}")):
+                            counter += 1
+                        new_name = f"{base}_{counter}{ext}"
+                        target_item = os.path.join(target_dir, new_name)
+                        logger.info(f"Renaming duplicate file: {item} -> {new_name}")
+                
+                shutil.move(source_item, target_item)
+                logger.info(f"Moved file: {item}")
+                merge_count += 1
+        
+        return merge_count > 0
+        
+    except Exception as e:
+        logger.error(f"Error merging directories {source_dir} -> {target_dir}: {e}")
+        return False
+
+def check_and_merge_duplicate_directories(movie_folder):
+    """Check for and merge duplicate Backdrops/Trailers directories."""
+    target_names = ['Backdrops', 'Trailers']
+    merged_count = 0
+    
+    try:
+        found_dirs = find_case_insensitive_directories(movie_folder, target_names)
+        
+        for target_name in target_names:
+            if target_name in found_dirs and len(found_dirs[target_name]) > 1:
+                logger.info(f"Found {len(found_dirs[target_name])} {target_name} directories in {os.path.basename(movie_folder)}")
+                
+                # Sort to prioritize the correctly named directory
+                dirs_list = found_dirs[target_name]
+                dirs_list.sort(key=lambda x: (x[0] != target_name, x[0].lower()))
+                
+                primary_dir = None
+                primary_path = None
+                
+                # Find or create the primary directory with correct case
+                for dir_name, dir_path in dirs_list:
+                    if dir_name == target_name:
+                        primary_dir = dir_name
+                        primary_path = dir_path
+                        break
+                
+                # If no correctly named directory exists, rename the first one
+                if not primary_dir:
+                    old_name, old_path = dirs_list[0]
+                    primary_path = os.path.join(movie_folder, target_name)
+                    
+                    try:
+                        os.rename(old_path, primary_path)
+                        logger.info(f"Renamed {old_name} -> {target_name}")
+                        dirs_list[0] = (target_name, primary_path)
+                        primary_dir = target_name
+                    except OSError as e:
+                        logger.error(f"Could not rename {old_name} to {target_name}: {e}")
+                        primary_path = old_path
+                        primary_dir = old_name
+                
+                # Merge all other directories into the primary one
+                for dir_name, dir_path in dirs_list[1:]:
+                    if dir_path != primary_path:
+                        logger.info(f"Merging {dir_name} into {primary_dir}")
+                        if merge_directories_preserving_symlinks(dir_path, primary_path):
+                            try:
+                                # Remove the now-empty source directory
+                                if os.path.exists(dir_path) and not os.listdir(dir_path):
+                                    os.rmdir(dir_path)
+                                    logger.info(f"Removed empty directory: {dir_name}")
+                                    merged_count += 1
+                                elif os.path.exists(dir_path):
+                                    logger.warning(f"Source directory not empty after merge: {dir_name}")
+                            except OSError as e:
+                                logger.warning(f"Could not remove directory {dir_name}: {e}")
+        
+        return merged_count > 0
+        
+    except Exception as e:
+        logger.error(f"Error checking for duplicate directories in {movie_folder}: {e}")
+        return False
+
+def ensure_standard_directory_names(movie_folder):
+    """Ensure Backdrops and Trailers directories use standard capitalization."""
+    target_dirs = {
+        'backdrops': 'Backdrops',
+        'trailers': 'Trailers'
+    }
+    
+    renamed_count = 0
+    
+    try:
+        if not os.path.exists(movie_folder) or not os.path.isdir(movie_folder):
+            return 0
+        
+        for item in os.listdir(movie_folder):
+            item_path = os.path.join(movie_folder, item)
+            if os.path.isdir(item_path):
+                lower_name = item.lower()
+                if lower_name in target_dirs and item != target_dirs[lower_name]:
+                    new_name = target_dirs[lower_name]
+                    new_path = os.path.join(movie_folder, new_name)
+                    
+                    if not os.path.exists(new_path):
+                        try:
+                            os.rename(item_path, new_path)
+                            logger.info(f"Renamed directory: {item} -> {new_name}")
+                            renamed_count += 1
+                        except OSError as e:
+                            logger.error(f"Could not rename {item} to {new_name}: {e}")
+                    else:
+                        logger.warning(f"Cannot rename {item} to {new_name}: target already exists")
+        
+        return renamed_count
+        
+    except Exception as e:
+        logger.error(f"Error ensuring standard directory names in {movie_folder}: {e}")
+        return 0
+
+def normalize_movie_directories(movie_folder):
+    """Complete directory normalization process for a movie folder."""
+    try:
+        movie_name = os.path.basename(movie_folder)
+        logger.debug(f"Normalizing directories for: {movie_name}")
+        
+        # Step 1: Check and merge duplicate directories
+        duplicates_merged = check_and_merge_duplicate_directories(movie_folder)
+        
+        # Step 2: Ensure standard naming
+        renames_done = ensure_standard_directory_names(movie_folder)
+        
+        # Step 3: Create directories if they don't exist (with correct case)
+        backdrops_dir = os.path.join(movie_folder, "Backdrops")
+        trailers_dir = os.path.join(movie_folder, "Trailers")
+        
+        os.makedirs(backdrops_dir, exist_ok=True)
+        os.makedirs(trailers_dir, exist_ok=True)
+        
+        # Step 4: Set proper permissions and ownership
+        set_directory_permissions(backdrops_dir, recursive=True)
+        set_directory_permissions(trailers_dir, recursive=True)
+        
+        if duplicates_merged or renames_done:
+            logger.info(f"Directory normalization completed for {movie_name}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error normalizing directories for {movie_folder}: {e}")
+        return False
+
+# ===== ORIGINAL AND ENHANCED TRAILER MANAGEMENT FUNCTIONS =====
 
 def get_file_hash(file_path):
     """Generate a hash of the file for tracking processed files."""
@@ -282,12 +562,10 @@ def reduce_video_volume_internal(video_path, volume_factor=0.5, processed_files=
 def manage_movie_trailers(movie_folder_path, process_volume=False, volume_factor=0.5, processed_files=None):
     """Manage trailers for a single movie folder."""
     movie_name = os.path.basename(movie_folder_path)
+    
+    # Use the normalized directory structure
     trailers_dir = os.path.join(movie_folder_path, "Trailers")
     backdrops_dir = os.path.join(movie_folder_path, "Backdrops")
-    
-    # Create directories if they don't exist
-    os.makedirs(trailers_dir, exist_ok=True)
-    os.makedirs(backdrops_dir, exist_ok=True)
     
     # Clean invalid symlinks
     cleaned = clean_invalid_symlinks(trailers_dir) + clean_invalid_symlinks(backdrops_dir)
@@ -470,7 +748,7 @@ def extract_theme_clip(movie_path, output_path, start_time, clip_length, use_gpu
 def process_movies(base_path, clip_length=18, method='visual', start_buffer=120, 
                   end_ignore_pct=0.3, force=False, use_gpu=False, 
                   process_trailers=True, process_trailer_volume=False, trailer_volume_factor=0.5):
-    """Main processing function with enhanced trailer management."""
+    """Main processing function with enhanced trailer management and directory normalization."""
     
     logger.info(f"🎬 Movie Theme Clipper starting...")
     logger.info(f"📁 Movie path: {base_path}")
@@ -478,6 +756,7 @@ def process_movies(base_path, clip_length=18, method='visual', start_buffer=120,
     logger.info(f"🎭 Method: {method}")
     logger.info(f"🚀 GPU acceleration: {use_gpu}")
     logger.info(f"🎞️ Process trailers: {process_trailers}")
+    logger.info(f"📂 Directory normalization: enabled")
     if process_trailers and process_trailer_volume:
         logger.info(f"🔊 Trailer volume reduction: {int((1-trailer_volume_factor)*100)}%")
     
@@ -500,14 +779,21 @@ def process_movies(base_path, clip_length=18, method='visual', start_buffer=120,
     failed = 0
     trailers_processed = 0
     trailers_skipped = 0
+    directories_normalized = 0
 
     for movie_folder_path, movie_file_path in tqdm(movies_data, desc="Processing movies", unit="movie"):
         movie_name = os.path.basename(movie_file_path)
         movie_folder = os.path.dirname(movie_file_path)
+        
+        # NEW: Normalize directory structure first
+        if normalize_movie_directories(movie_folder):
+            directories_normalized += 1
+        
+        # Use normalized directory paths
         backdrop_dir = os.path.join(movie_folder, "Backdrops")
         theme_clip_output_path = os.path.join(backdrop_dir, "theme.mp4")
 
-        # Process trailers first
+        # Process trailers
         if process_trailers:
             trailer_result = manage_movie_trailers(
                 movie_folder, 
@@ -526,7 +812,6 @@ def process_movies(base_path, clip_length=18, method='visual', start_buffer=120,
             skipped += 1
             continue
 
-        os.makedirs(backdrop_dir, exist_ok=True)
         logger.info(f"🎞️ Processing theme clip: {os.path.basename(movie_folder)}")
 
         try:
@@ -597,6 +882,7 @@ def process_movies(base_path, clip_length=18, method='visual', start_buffer=120,
     logger.info(f"   Theme clips: {processed} processed, {skipped} skipped, {failed} failed")
     if process_trailers:
         logger.info(f"   Trailers: {trailers_processed} processed, {trailers_skipped} skipped")
+    logger.info(f"   Directories normalized: {directories_normalized}")
 
 def get_env_bool(env_var, default=False):
     """Convert environment variable to boolean."""
