@@ -192,13 +192,14 @@ def reduce_video_volume_internal(video_path, volume_factor=0.5, processed_files=
     
     logger.info(f"Reducing volume by {int((1-volume_factor)*100)}% for {os.path.basename(video_path)}")
     
-    temp_output = video_path + ".tmp"
+    # Create temp file with .mp4 extension so FFmpeg recognizes the format
+    temp_output = video_path + ".volume_temp.mp4"
     
     try:
         if os.path.exists(temp_output):
             os.remove(temp_output)
         
-        # FFmpeg command for volume reduction
+        # FFmpeg command for volume reduction with explicit format
         cmd = [
             'ffmpeg', '-y', '-v', 'warning',
             '-i', video_path,
@@ -206,15 +207,25 @@ def reduce_video_volume_internal(video_path, volume_factor=0.5, processed_files=
             '-af', f'volume={volume_factor}',  # Reduce audio volume
             '-c:a', 'aac',   # Re-encode audio
             '-movflags', '+faststart',
+            '-f', 'mp4',     # Explicitly specify MP4 format
             temp_output
         ]
+        
+        logger.debug(f"Volume reduction command: {' '.join(cmd[:-1])} [output_file]")
         
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         
         if result.returncode != 0:
             logger.error(f"FFmpeg volume reduction failed for {os.path.basename(video_path)}")
             if result.stderr:
-                logger.error(f"FFmpeg stderr: {result.stderr[-300:]}")
+                # Show key error lines
+                stderr_lines = result.stderr.strip().split('\n')
+                error_lines = [line for line in stderr_lines if any(keyword in line.lower() 
+                              for keyword in ['error', 'failed', 'unable', 'invalid'])]
+                if error_lines:
+                    logger.error(f"FFmpeg errors: {'; '.join(error_lines[-2:])}")
+                else:
+                    logger.error(f"FFmpeg stderr (last 200 chars): {result.stderr[-200:]}")
             return False
         
         # Check output file
@@ -232,8 +243,19 @@ def reduce_video_volume_internal(video_path, volume_factor=0.5, processed_files=
         
         # Replace original with processed version
         original_stat = os.stat(video_path)
+        
+        # Create backup name for safety
+        backup_path = video_path + ".original_backup"
+        
+        # Move original to backup, then move processed to original location
+        shutil.move(video_path, backup_path)
         shutil.move(temp_output, video_path)
+        
+        # Restore original file permissions
         os.chmod(video_path, original_stat.st_mode)
+        
+        # Remove backup if everything succeeded
+        os.remove(backup_path)
         
         # Mark as processed
         if processed_files is not None:
@@ -249,11 +271,13 @@ def reduce_video_volume_internal(video_path, volume_factor=0.5, processed_files=
         logger.error(f"Volume reduction failed for {os.path.basename(video_path)}: {e}")
         return False
     finally:
-        if os.path.exists(temp_output):
-            try:
-                os.remove(temp_output)
-            except:
-                pass
+        # Clean up temporary files
+        for temp_file in [temp_output, video_path + ".original_backup"]:
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
 
 def manage_movie_trailers(movie_folder_path, process_volume=False, volume_factor=0.5, processed_files=None):
     """Manage trailers for a single movie folder."""
