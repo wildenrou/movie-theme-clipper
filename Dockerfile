@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 LABEL org.opencontainers.image.title="Movie Theme Clipper"
 LABEL org.opencontainers.image.description="Automatically generates theme clips from movie collections using AI analysis"
-LABEL org.opencontainers.image.vendor="Your Name"
+LABEL org.opencontainers.image.vendor="wildenrou"
 LABEL org.opencontainers.image.source="https://github.com/wildenrou/movie-theme-clipper"
 
 # Install system dependencies including Intel GPU drivers
@@ -10,7 +10,6 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsndfile1-dev \
     intel-media-va-driver \
-    intel-media-va-driver-non-free \
     vainfo \
     curl \
     && rm -rf /var/lib/apt/lists/*
