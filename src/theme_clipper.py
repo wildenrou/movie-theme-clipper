@@ -14,19 +14,28 @@ warnings.filterwarnings("ignore")
 
 import contextlib
 
-# Setup logging
+# Setup logging with better error handling
 def setup_logging():
     log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
+    
+    # Start with console handler
+    handlers = [logging.StreamHandler(sys.stdout)]
+    
+    # Try to add file handler if possible
+    try:
+        if os.path.exists('/logs') and os.access('/logs', os.W_OK):
+            handlers.append(logging.FileHandler('/logs/theme_clipper.log'))
+        elif os.path.exists('/logs'):
+            print("Warning: /logs directory exists but is not writable. Logging to console only.")
+    except Exception as e:
+        print(f"Warning: Could not set up file logging: {e}. Logging to console only.")
     
     # Configure logging
     logging.basicConfig(
         level=getattr(logging, log_level, logging.INFO),
         format=log_format,
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler('/logs/theme_clipper.log') if os.path.exists('/logs') else logging.NullHandler()
-        ]
+        handlers=handlers
     )
     return logging.getLogger(__name__)
 
@@ -134,6 +143,144 @@ def get_random_clip_start(duration, clip_length, start_buffer, end_ignore_pct):
 
     return random.uniform(effective_start_buffer, latest_valid_start_time)
 
+def extract_theme_clip(movie_path, output_path, start_time, clip_length, use_gpu=False):
+    """Extracts a theme clip using ffmpeg with optional GPU acceleration."""
+    try:
+        # Build FFmpeg command
+        final_ffmpeg_cmd = ["ffmpeg", "-y", "-v", "warning"]
+        final_ffmpeg_cmd.extend(["-analyzeduration", "20M", "-probesize", "20M"])
+        final_ffmpeg_cmd.extend(["-ss", str(start_time), "-i", movie_path, "-t", str(clip_length)])
+
+        # Video encoding
+        if use_gpu:
+            # Try Intel GPU acceleration
+            final_ffmpeg_cmd.extend(["-c:v", "h264_vaapi", "-vaapi_device", "/dev/dri/renderD128", "-qp", "23"])
+        else:
+            final_ffmpeg_cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p"])
+
+        # Audio encoding
+        final_ffmpeg_cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"])
+        
+        # Scale down if needed
+        final_ffmpeg_cmd.extend(["-vf", "scale=-2:720"])
+        
+        final_ffmpeg_cmd.append(output_path)
+
+        # Execute FFmpeg
+        process = subprocess.run(final_ffmpeg_cmd, capture_output=True, text=True, 
+                               encoding='utf-8', errors='ignore', timeout=300)
+
+        if process.returncode != 0:
+            logger.error(f"FFmpeg failed for {os.path.basename(movie_path)}")
+            if process.stderr:
+                logger.debug(f"FFmpeg stderr: {process.stderr[-500:]}")
+            return False
+            
+        return True
+
+    except subprocess.TimeoutExpired:
+        logger.error(f"FFmpeg timeout for {os.path.basename(movie_path)}")
+        return False
+    except Exception as e:
+        logger.error(f"Exception during clip extraction for {os.path.basename(movie_path)}: {e}")
+        return False
+
+def process_movies(base_path, clip_length=18, method='visual', start_buffer=120, 
+                  end_ignore_pct=0.3, force=False, use_gpu=False):
+    """Main processing function."""
+    
+    logger.info(f"🎬 Movie Theme Clipper starting...")
+    logger.info(f"📁 Movie path: {base_path}")
+    logger.info(f"⏱️ Clip length: {clip_length}s")
+    logger.info(f"🎭 Method: {method}")
+    logger.info(f"🚀 GPU acceleration: {use_gpu}")
+    
+    movies_data = find_movie_files(base_path)
+    if not movies_data:
+        logger.error("No movies found to process")
+        return
+
+    processed = 0
+    skipped = 0
+    failed = 0
+
+    for movie_folder_path, movie_file_path in tqdm(movies_data, desc="Processing movies", unit="movie"):
+        movie_name = os.path.basename(movie_file_path)
+        backdrop_dir = os.path.join(movie_folder_path, "Backdrops")
+        theme_clip_output_path = os.path.join(backdrop_dir, "theme.mp4")
+
+        # Skip if theme already exists
+        if os.path.exists(theme_clip_output_path) and os.path.getsize(theme_clip_output_path) > 0 and not force:
+            logger.info(f"⏩ Skipping {movie_name} - theme.mp4 already exists")
+            skipped += 1
+            continue
+
+        os.makedirs(backdrop_dir, exist_ok=True)
+        logger.info(f"🎞️ Processing: {movie_name}")
+
+        try:
+            # Get movie duration using ffprobe
+            probe_cmd = [
+                "ffprobe", "-v", "error", "-analyzeduration", "10M", "-probesize", "10M",
+                "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
+                movie_file_path
+            ]
+            duration_process = subprocess.run(probe_cmd, capture_output=True, text=True, 
+                                           check=True, encoding='utf-8', errors='ignore', timeout=30)
+            duration_str = duration_process.stdout.strip().split('\n')[0]
+
+            if not duration_str or not duration_str.replace('.', '', 1).isdigit():
+                logger.warning(f"Could not determine duration for {movie_name}")
+                failed += 1
+                continue
+                
+            duration = float(duration_str)
+
+            if duration <= 0:
+                logger.warning(f"Invalid duration for {movie_name}: {duration}")
+                failed += 1
+                continue
+
+            # For now, use random selection (simplified version)
+            # You can add the full analysis methods later
+            current_clip_length = min(clip_length, duration * 0.8)
+            if current_clip_length < 5:
+                current_clip_length = min(duration, clip_length)
+                start_time_sec = 0
+            else:
+                start_time_sec = get_random_clip_start(duration, current_clip_length, start_buffer, end_ignore_pct)
+
+            start_time_sec = max(0, float(start_time_sec))
+            if start_time_sec + current_clip_length > duration:
+                start_time_sec = max(0, duration - current_clip_length)
+                
+            if current_clip_length <= 0:
+                logger.warning(f"Invalid clip length for {movie_name}")
+                failed += 1
+                continue
+
+            logger.info(f"Extracting clip: {start_time_sec:.2f}s-{start_time_sec + current_clip_length:.2f}s")
+            
+            # Extract the clip
+            success = extract_theme_clip(movie_file_path, theme_clip_output_path, 
+                                       start_time_sec, current_clip_length, use_gpu=use_gpu)
+
+            if success and os.path.exists(theme_clip_output_path) and os.path.getsize(theme_clip_output_path) > 100:
+                logger.info(f"✅ Successfully created theme clip for {movie_name}")
+                processed += 1
+            else:
+                logger.error(f"❌ Failed to create theme clip for {movie_name}")
+                failed += 1
+
+        except subprocess.TimeoutExpired:
+            logger.error(f"Timeout processing {movie_name}")
+            failed += 1
+        except Exception as e:
+            logger.error(f"Error processing {movie_name}: {e}")
+            failed += 1
+
+    logger.info(f"🎉 Processing complete: {processed} processed, {skipped} skipped, {failed} failed")
+
 def get_env_bool(env_var, default=False):
     """Convert environment variable to boolean."""
     value = os.getenv(env_var, str(default)).lower()
@@ -160,7 +307,7 @@ if __name__ == '__main__':
     method = os.getenv('METHOD', 'visual')
     start_buffer = get_env_int('START_BUFFER', 120)
     end_ignore_pct = get_env_float('END_IGNORE_PCT', 0.3)
-    use_gpu = get_env_bool('USE_GPU', True)
+    use_gpu = get_env_bool('USE_GPU', False)
     force = get_env_bool('FORCE', False)
 
     # Validate GPU if requested
@@ -177,7 +324,18 @@ if __name__ == '__main__':
     logger.info(f"  GPU acceleration: {use_gpu}")
     logger.info(f"  Force overwrite: {force}")
 
-    # This is a simplified version for setup testing
-    print("🎬 Movie Theme Clipper setup complete!")
-    print("This container is ready to process your movie collection.")
-    print("For full functionality, use the complete application code.")
+    try:
+        process_movies(
+            base_path=movie_library_path,
+            clip_length=clip_length,
+            method=method,
+            start_buffer=start_buffer,
+            end_ignore_pct=end_ignore_pct,
+            force=force,
+            use_gpu=use_gpu
+        )
+    except KeyboardInterrupt:
+        logger.info("Processing interrupted by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)

@@ -9,6 +9,7 @@ LABEL org.opencontainers.image.source="https://github.com/wildenrou/movie-theme-
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsndfile1-dev \
+    vainfo \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
