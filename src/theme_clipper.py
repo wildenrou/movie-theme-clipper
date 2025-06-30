@@ -86,44 +86,93 @@ def get_nobody_uid_gid():
             return 65534, 65534  # Standard nobody UID/GID
 
 def set_directory_permissions(directory_path, recursive=True):
-    """Set directory ownership to 'nobody' and permissions to read/write for all."""
+    """Set directory permissions optimized for NFS mounts."""
     try:
         if not os.path.exists(directory_path):
             logger.warning(f"Directory does not exist: {directory_path}")
             return False
         
-        nobody_uid, nobody_gid = get_nobody_uid_gid()
+        # Check if this is likely an NFS mount
+        is_nfs = is_nfs_mount(directory_path)
+        if is_nfs:
+            logger.debug(f"Detected NFS mount for {directory_path}, using NFS-optimized permissions")
         
-        # Set permissions for the directory itself
-        os.chmod(directory_path, 0o755)  # rwxr-xr-x for directories
-        os.chown(directory_path, nobody_uid, nobody_gid)
+        # For NFS, focus only on chmod operations (not chown)
+        try:
+            os.chmod(directory_path, 0o755)  # rwxr-xr-x for directories
+            logger.debug(f"Set permissions 755 for directory: {os.path.basename(directory_path)}")
+        except (OSError, PermissionError) as e:
+            logger.debug(f"Could not set permissions for directory {directory_path}: {e}")
+            # For NFS, this might be normal - the server controls permissions
+            return True  # Don't fail the entire operation
         
         if recursive:
+            permission_errors = 0
+            total_items = 0
+            
             for root, dirs, files in os.walk(directory_path):
                 # Set directory permissions
                 for dir_name in dirs:
                     dir_path = os.path.join(root, dir_name)
+                    total_items += 1
                     try:
                         os.chmod(dir_path, 0o755)
-                        os.chown(dir_path, nobody_uid, nobody_gid)
                     except (OSError, PermissionError) as e:
-                        logger.warning(f"Could not set permissions for directory {dir_path}: {e}")
+                        permission_errors += 1
+                        logger.debug(f"Could not set permissions for directory {dir_path}: {e}")
                 
-                # Set file permissions
+                # Set file permissions  
                 for file_name in files:
                     file_path = os.path.join(root, file_name)
+                    total_items += 1
                     try:
                         os.chmod(file_path, 0o644)  # rw-r--r-- for files
-                        os.chown(file_path, nobody_uid, nobody_gid)
                     except (OSError, PermissionError) as e:
-                        logger.warning(f"Could not set permissions for file {file_path}: {e}")
+                        permission_errors += 1
+                        logger.debug(f"Could not set permissions for file {file_path}: {e}")
+            
+            if permission_errors > 0:
+                logger.info(f"Permission setting completed for {os.path.basename(directory_path)} "
+                          f"({total_items - permission_errors}/{total_items} items successful)")
+            else:
+                logger.info(f"Set permissions for directory: {os.path.basename(directory_path)}")
         
-        logger.info(f"Set permissions for directory: {os.path.basename(directory_path)}")
         return True
         
     except Exception as e:
-        logger.error(f"Error setting permissions for {directory_path}: {e}")
-        return False
+        logger.debug(f"Permission setting skipped for {directory_path}: {e}")
+        return True  # Don't fail directory normalization due to permission issues
+
+def is_nfs_mount(path):
+    """Check if a path is on an NFS mount."""
+    try:
+        # Try to read /proc/mounts to detect NFS
+        with open('/proc/mounts', 'r') as f:
+            mounts = f.read()
+            
+        # Find the longest matching mount point for this path
+        abs_path = os.path.abspath(path)
+        nfs_mounts = []
+        
+        for line in mounts.split('\n'):
+            if ' nfs' in line or ' nfs4' in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    mount_point = parts[1]
+                    if abs_path.startswith(mount_point):
+                        nfs_mounts.append(mount_point)
+        
+        return len(nfs_mounts) > 0
+        
+    except Exception:
+        # Fallback detection: if chown fails, assume it might be NFS
+        try:
+            # Try a harmless chown operation to detect restrictions
+            current_stat = os.stat(path)
+            os.chown(path, current_stat.st_uid, current_stat.st_gid)
+            return False  # chown worked, probably not NFS with restrictions
+        except (OSError, PermissionError):
+            return True   # chown failed, likely NFS or similar restricted mount
 
 def find_case_insensitive_directories(movie_folder, target_names):
     """Find directories with case-insensitive matching to target names."""
