@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <n>Movie-Theme-Clipper</n>
+  <Repository>ghcr.io/wildenrou/movie-theme-clipper:latest</Repository>
+  <Registry>https://ghcr.io</Registry>
+  <Network>none</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/wildenrou/movie-theme-clipper/issues</Support>
+  <Project>https://github.com/wildenrou/movie-theme-clipper</Project>
+  <Overview>Automatically generates theme clips from movie collections for media servers like Plex, Jellyfin, and Emby. Uses intelligent analysis methods (visual, audio, music) and Intel GPU acceleration for fast processing.</Overview>
+  <Category>MediaApp:Video</Category>
+  <WebUI/>
+  <TemplateURL>https://raw.githubusercontent.com/wildenrou/movie-theme-clipper/main/templates/unraid-template.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/wildenrou/movie-theme-clipper/main/.github/images/icon.png</Icon>
+  <ExtraParams>--device=/dev/dri:/dev/dri</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled>1704067200</DateInstalled>
+  <DonateText>Support Development</DonateText>
+  <DonateLink>https://github.com/sponsors/wildenrou</DonateLink>
+  <Requires>Intel GPU with VAAPI support for hardware acceleration</Requires>
+  <Config Name="Host Path 1" Target="/movies" Default="/mnt/user/media/movies" Mode="rw" Description="Path to your movie collection" Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Host Path 2" Target="/logs" Default="/mnt/user/appdata/theme-clipper/logs" Mode="rw" Description="Path for log files" Type="Path" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Variable: CLIP_LENGTH" Target="CLIP_LENGTH" Default="18" Mode="" Description="Length of theme clips in seconds (10-30 recommended)" Type="Variable" Display="always" Required="false" Mask="false">18</Config>
+  <Config Name="Variable: METHOD" Target="METHOD" Default="visual" Mode="" Description="Analysis method: visual (dynamic scenes), audio (high activity), music (harmonic content), random" Type="Variable" Display="always" Required="false" Mask="false">visual</Config>
+  <Config Name="Variable: USE_GPU" Target="USE_GPU" Default="true" Mode="" Description="Enable Intel GPU hardware acceleration (requires Intel GPU)" Type="Variable" Display="always" Required="false" Mask="false">true</Config>
+  <Config Name="Variable: START_BUFFER" Target="START_BUFFER" Default="120" Mode="" Description="Skip first N seconds of movie (avoid intros/credits)" Type="Variable" Display="advanced" Required="false" Mask="false">120</Config>
+  <Config Name="Variable: END_IGNORE_PCT" Target="END_IGNORE_PCT" Default="0.3" Mode="" Description="Ignore last N% of movie (0.3 = 30%, avoids credits)" Type="Variable" Display="advanced" Required="false" Mask="false">0.3</Config>
+  <Config Name="Variable: FORCE" Target="FORCE" Default="false" Mode="" Description="Overwrite existing theme clips (true/false)" Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+  <Config Name="Variable: LOG_LEVEL" Target="LOG_LEVEL" Default="INFO" Mode="" Description="Logging level: DEBUG, INFO, WARNING, ERROR" Type="Variable" Display="advanced" Required="false" Mask="false">INFO</Config>
+</Container>
