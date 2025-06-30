@@ -146,34 +146,64 @@ def get_random_clip_start(duration, clip_length, start_buffer, end_ignore_pct):
 def extract_theme_clip(movie_path, output_path, start_time, clip_length, use_gpu=False):
     """Extracts a theme clip using ffmpeg with optional GPU acceleration."""
     try:
-        # Build FFmpeg command
-        final_ffmpeg_cmd = ["ffmpeg", "-y", "-v", "warning"]
-        final_ffmpeg_cmd.extend(["-analyzeduration", "20M", "-probesize", "20M"])
+        # Build FFmpeg command with better error handling
+        final_ffmpeg_cmd = ["ffmpeg", "-y", "-v", "info"]  # Changed from "warning" to "info" for better debugging
+        final_ffmpeg_cmd.extend(["-analyzeduration", "100M", "-probesize", "100M"])  # Increased for complex files
         final_ffmpeg_cmd.extend(["-ss", str(start_time), "-i", movie_path, "-t", str(clip_length)])
 
-        # Video encoding
+        # Handle complex video formats more robustly
+        video_filters = []
+        
+        # Scale down and ensure compatibility
+        video_filters.append("scale=1280:720:force_original_aspect_ratio=decrease")
+        video_filters.append("pad=1280:720:(ow-iw)/2:(oh-ih)/2")  # Add padding if needed
+        
+        if video_filters:
+            final_ffmpeg_cmd.extend(["-vf", ",".join(video_filters)])
+
+        # Use software encoding for better compatibility with complex formats
         if use_gpu:
-            # Try Intel GPU acceleration
-            final_ffmpeg_cmd.extend(["-c:v", "h264_vaapi", "-vaapi_device", "/dev/dri/renderD128", "-qp", "23"])
+            # Try GPU first, but with fallback
+            try:
+                # Test if GPU encoding works
+                test_cmd = ["ffmpeg", "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=1", 
+                           "-c:v", "h264_vaapi", "-vaapi_device", "/dev/dri/renderD128", "-f", "null", "-"]
+                test_result = subprocess.run(test_cmd, capture_output=True, timeout=5)
+                if test_result.returncode == 0:
+                    final_ffmpeg_cmd.extend(["-c:v", "h264_vaapi", "-vaapi_device", "/dev/dri/renderD128", "-qp", "23"])
+                else:
+                    raise Exception("GPU test failed")
+            except:
+                # Fallback to CPU
+                logger.warning(f"GPU encoding failed for {os.path.basename(movie_path)}, using CPU")
+                final_ffmpeg_cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p"])
         else:
             final_ffmpeg_cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p"])
 
-        # Audio encoding
+        # Audio encoding - handle various input formats
         final_ffmpeg_cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"])
         
-        # Scale down if needed
-        final_ffmpeg_cmd.extend(["-vf", "scale=-2:720"])
-        
+        # Force output format
+        final_ffmpeg_cmd.extend(["-f", "mp4"])
         final_ffmpeg_cmd.append(output_path)
 
         # Execute FFmpeg
+        logger.debug(f"FFmpeg command: {' '.join(final_ffmpeg_cmd)}")
+        
         process = subprocess.run(final_ffmpeg_cmd, capture_output=True, text=True, 
-                               encoding='utf-8', errors='ignore', timeout=300)
+                               encoding='utf-8', errors='ignore', timeout=600)  # Increased timeout
 
         if process.returncode != 0:
             logger.error(f"FFmpeg failed for {os.path.basename(movie_path)}")
+            logger.error(f"FFmpeg command: {' '.join(final_ffmpeg_cmd)}")
             if process.stderr:
-                logger.debug(f"FFmpeg stderr: {process.stderr[-500:]}")
+                # Show actual FFmpeg error
+                stderr_lines = process.stderr.strip().split('\n')
+                error_lines = [line for line in stderr_lines if 'error' in line.lower() or 'failed' in line.lower()]
+                if error_lines:
+                    logger.error(f"FFmpeg errors: {'; '.join(error_lines[-3:])}")  # Last 3 error lines
+                else:
+                    logger.error(f"FFmpeg stderr (last 500 chars): {process.stderr[-500:]}")
             return False
             
         return True
