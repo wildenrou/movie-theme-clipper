@@ -5,12 +5,10 @@ LABEL org.opencontainers.image.description="Automatically generates theme clips 
 LABEL org.opencontainers.image.vendor="wildenrou"
 LABEL org.opencontainers.image.source="https://github.com/wildenrou/movie-theme-clipper"
 
-# Install system dependencies including Intel GPU drivers
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsndfile1-dev \
-    intel-media-va-driver \
-    vainfo \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -40,7 +38,7 @@ ENV CLIP_LENGTH="18"
 ENV METHOD="visual"
 ENV START_BUFFER="120"
 ENV END_IGNORE_PCT="0.3"
-ENV USE_GPU="true"
+ENV USE_GPU="false"
 ENV FORCE="false"
 ENV LOG_LEVEL="INFO"
 ENV PYTHONUNBUFFERED=1
