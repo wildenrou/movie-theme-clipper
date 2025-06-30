@@ -21,7 +21,8 @@
   <DonateText>Support Development</DonateText>
   <DonateLink>https://github.com/sponsors/wildenrou</DonateLink>
   <Requires>Intel GPU with VAAPI support for hardware acceleration</Requires>
-  <Config Name="Host Path 1" Target="/movies" Default="/mnt/user/media/movies" Mode="rw" Description="Path to your movie collection" Type="Path" Display="always" Required="true" Mask="false"/>
+ <!-- Update the Default path to match your setup -->
+  <Config Name="Host Path 1" Target="/movies" Default="/mnt/remotes/192.168.1.1_data/media/movies" Mode="rw" Description="Path to your movie collection" Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="Host Path 2" Target="/logs" Default="/mnt/user/appdata/theme-clipper/logs" Mode="rw" Description="Path for log files" Type="Path" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Variable: CLIP_LENGTH" Target="CLIP_LENGTH" Default="18" Mode="" Description="Length of theme clips in seconds (10-30 recommended)" Type="Variable" Display="always" Required="false" Mask="false">18</Config>
   <Config Name="Variable: METHOD" Target="METHOD" Default="visual" Mode="" Description="Analysis method: visual (dynamic scenes), audio (high activity), music (harmonic content), random" Type="Variable" Display="always" Required="false" Mask="false">visual</Config>
