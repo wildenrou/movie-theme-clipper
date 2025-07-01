@@ -2,6 +2,8 @@
 
 Automatically generates theme clips from movie collections for media servers like Plex, Jellyfin, and Emby. Uses intelligent analysis methods and Intel GPU acceleration for fast, high-quality processing.
 
+![icon (Medium)](https://github.com/user-attachments/assets/a240bde6-735a-41cc-b020-ded787817b60)
+
 ## Quick Start with Unraid!
 
 ### Docker Command Line
